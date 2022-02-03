@@ -105,7 +105,7 @@ impl Handler {
             // Strip the command part of the message, leaving just the prompt
             // to the AI.
             let (_, prompt) = msg.content.split_once("!smprompt").unwrap();
-            let prompt = prompt.trim();
+            let prompt = prompt.trim_start();
 
             // If we didn't receive a prompt or received a prompt that was
             // just whitespace, tell the user that they need to include text

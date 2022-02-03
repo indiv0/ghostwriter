@@ -101,7 +101,23 @@ impl Handler {
     async fn message_(&self, ctx: &Context, msg: &Message) -> Option<Cow<'_, str>> {
         if msg.content == "!ping" {
             return Some(Cow::Borrowed("Pong!"));
-        } else if msg.content.starts_with("!smprompt") && msg.author.id == 117530756263182344 {
+        }
+
+        let (mut prompt, raw) = if msg.content.starts_with("!smprompt_raw") {
+            // Strip the command part of the message, leaving just the prompt
+            // to the AI.
+            let (_, prompt) = msg.content.split_once("!smprompt_raw").unwrap();
+            let prompt = prompt.trim_start();
+
+            // If we didn't receive a prompt or received a prompt that was
+            // just whitespace, tell the user that they need to include text
+            // in the prompt.
+            if prompt.is_empty() {
+                return Some(Cow::Borrowed("usage: smprompt_raw text"));
+            }
+
+            (Cow::Borrowed(prompt), true)
+        } else if msg.content.starts_with("!smprompt") {
             // Strip the command part of the message, leaving just the prompt
             // to the AI.
             let (_, prompt) = msg.content.split_once("!smprompt").unwrap();
@@ -114,133 +130,188 @@ impl Handler {
                 return Some(Cow::Borrowed("usage: smprompt text"));
             }
 
-            // Restrict the input to at most 200 characters to limit the
-            // usage of API tokens.
-            //if prompt.len() > 200 {
-            //    return Some(Cow::Owned(format!(
-            //        "prompt must be 200 characters or less; your prompt was {} character(s) too long",
-            //        prompt.len() - 200,
-            //    )));
-            //}
-
-            // Enforce a global rate limit of 60 requests per minute to avoid
-            // spam from overwhelming the bot OR overwhelming the AI API.
-            // Check to see if this command is rate limited.
-            if let Some(remaining) = ctx
-                .data
-                .write()
-                .await
-                .get_mut::<RateLimitKey>()
-                .expect("expected RateLimit in ShareMap")
-                .is_limited()
-            {
-                return Some(Cow::Owned(format!(
-                    "rate limit of 60 requests per minute reached, please wait at least {} second(s) before trying again",
-                    remaining
-                )));
-            }
-
-            //// Request a code completion from the AI API.
-            println!("user {} requested prompt: {}", msg.author.id.0, prompt);
-            let body = match ureq::post("https://api.goose.ai/v1/engines/gpt-neo-20b/completions")
-                .set("Authorization", &format!("Bearer {}", self.api_key))
-                .send_json(ureq::json!({
-                    "prompt": prompt,
-                    "temperature": 0,  // Default 1
-                    "max_tokens": 100, // Default 16
-                    //"top_p": 1,        // Default 1
-                    "stop": ["\n"],      // Default null
-                })) {
-                Ok(body) => body,
-                Err(error) => {
-                    eprint!("error requesting prompt: {:?}", error);
-                    // If it's not a transport error, it'll have a body.
-                    if let Some(body) = error.into_response().map(|r| r.into_string()) {
-                        eprint!(": {:?}", body);
-                    }
-                    eprintln!();
-                    return Some(Cow::Borrowed("prompt request failed"));
-                }
-            };
-            print!("response: {:?}", body);
-            // Read the response into a `serde_json::Value`.
-            let body: Value = match body.into_json() {
-                Ok(body) => body,
-                Err(error) => {
-                    eprintln!("error requesting prompt: {:?}", error);
-                    return Some(Cow::Borrowed("prompt request failed"));
-                }
-            };
-            println!(": {:?}", body);
-            // Read the actual content of the response out of the JSON.
-            //
-            // ```json
-            // {
-            //   "choices": [
-            //     {
-            //       "finish_reason": null,
-            //       "index": 0,
-            //       "logprobs": {
-            //         "text_offset": [0, 1, 2, 4, 5],
-            //         "tokens": [
-            //           ".",
-            //           "bytes:'\\n'",
-            //           "",
-            //           "\u003c/",
-            //           "p",
-            //           "\u003e"
-            //         ]
-            //      },
-            //      "text": ".\n\u003c/p\u003e",
-            //      "token_index": 0
-            //     }
-            //   ],
-            //   "created": 1643862189,
-            //   "id": "2dfd25bc-9a8e-440d-a808-29494b3b30f6",
-            //   "model": "gpt-neo-20B-fp16",
-            //   "object": "text_completion"
-            // }
-            // ```
-            let body = match body
-                .get("choices")
-                .and_then(|v| v.get(0))
-                .and_then(|v| v.get("text"))
-                .and_then(|v| v.as_str())
-            {
-                Some(body) => body,
-                None => {
-                    eprintln!("error parsing prompt: {:?}", body);
-                    return Some(Cow::Borrowed("prompt request failed"));
-                }
-            };
-
-            // Sanitize the response, because the user might've found a way
-            // to XSS @mentions or other fun stuff into the response.
-            let settings = if let Some(guild_id) = msg.guild_id {
-                // Be default, roles, users, channel, here, and everyone
-                // mentions are cleaned.
-                ContentSafeOptions::default()
-                    // We do not want to clean channel mentions as they do
-                    // not ping users.
-                    .clean_channel(false)
-                    // If it's a guild channel, we want mentioned users to be
-                    // displayed as their display name.
-                    .display_as_member_from(guild_id)
-            } else {
-                ContentSafeOptions::default()
-                    .clean_channel(false)
-                    .clean_role(false)
-            };
-            let response = content_safe(&ctx.cache, &body, &settings).await;
-
-            // Append a disclaimer to the response.
-            let response = format!("{}\n\n**DISCLAIMER**: This is an AI-generated response from the gpt-neo-20b model hosted on goose.ai", response);
-
-            return Some(Cow::Owned(response));
+            (Cow::Borrowed(prompt), false)
         } else {
             // If the message wasn't a command, there's no reply to send.
-            None
+            return None;
+        };
+
+        // Restrict the input to at most 200 characters to limit the
+        // usage of API tokens.
+        //if prompt.len() > 200 {
+        //    return Some(Cow::Owned(format!(
+        //        "prompt must be 200 characters or less; your prompt was {} character(s) too long",
+        //        prompt.len() - 200,
+        //    )));
+        //}
+
+        // Enforce a global rate limit of 60 requests per minute to avoid
+        // spam from overwhelming the bot OR overwhelming the AI API.
+        // Check to see if this command is rate limited.
+        if let Some(remaining) = ctx
+            .data
+            .write()
+            .await
+            .get_mut::<RateLimitKey>()
+            .expect("expected RateLimit in ShareMap")
+            .is_limited()
+        {
+            return Some(Cow::Owned(format!(
+                "rate limit of 60 requests per minute reached, please wait at least {} second(s) before trying again",
+                remaining
+            )));
         }
+
+        // If this is an `!smprompt` command, then we assume the user is
+        // asking a question, so we prepend some information to make the AI
+        // more likely to respond correctly.
+        if !raw {
+            prompt = Cow::Owned(format!(
+                "I am a highly intelligent question answering bot. If you \
+ask me a question that is rooted in truth, I will give you \
+the answer. If you ask me a question that is nonsense, \
+trickery, or has no clear answer, I will respond with \
+\"Unknown.\".
+
+Q: What is the human life expectancy in the United States?
+A: Human life expectancy in the United States is 78 years.
+
+Q: Who was president of the United States in 1955?
+A: Dwight D. Eisenhower was president of the United States \
+in 1955.
+
+Q: Which party did he belong to?
+A: He belonged to the Republican Party.
+
+Q: What is the square root of banana?
+A: Unknown.
+
+Q: How does a telescope work?
+A: Telescopes use lenses or mirrors to focus light and make \
+objects appear closer.
+
+Q: Where were the 1992 Olympics held?
+A: The 1992 Olympics were held in Barcelona, Spain.
+
+Q: How many squigs are in a bonk?
+A: Unknown.
+
+Q: Where is the Valley of Kings?
+A: The Valley of Kings is located in Luxor, Egypt.
+
+Q: {}
+A:",
+                prompt
+            ));
+        }
+
+        //// Request a code completion from the AI API.
+        println!(
+            "user {} requested prompt: {}, raw?: {}",
+            msg.author.id.0, prompt, raw
+        );
+        let body = match ureq::post("https://api.goose.ai/v1/engines/gpt-neo-20b/completions")
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .send_json(ureq::json!({
+                "prompt": prompt,
+                "temperature": 0,  // Default 1
+                "max_tokens": 100, // Default 16
+                //"top_p": 1,        // Default 1
+                "stop": ["\n"],      // Default null
+            })) {
+            Ok(body) => body,
+            Err(error) => {
+                eprint!("error requesting prompt: {:?}", error);
+                // If it's not a transport error, it'll have a body.
+                if let Some(body) = error.into_response().map(|r| r.into_string()) {
+                    eprint!(": {:?}", body);
+                }
+                eprintln!();
+                return Some(Cow::Borrowed("prompt request failed"));
+            }
+        };
+        print!("response: {:?}", body);
+        // Read the response into a `serde_json::Value`.
+        let body: Value = match body.into_json() {
+            Ok(body) => body,
+            Err(error) => {
+                eprintln!("error requesting prompt: {:?}", error);
+                return Some(Cow::Borrowed("prompt request failed"));
+            }
+        };
+        println!(": {:?}", body);
+        // Read the actual content of the response out of the JSON.
+        //
+        // ```json
+        // {
+        //   "choices": [
+        //     {
+        //       "finish_reason": null,
+        //       "index": 0,
+        //       "logprobs": {
+        //         "text_offset": [0, 1, 2, 4, 5],
+        //         "tokens": [
+        //           ".",
+        //           "bytes:'\\n'",
+        //           "",
+        //           "\u003c/",
+        //           "p",
+        //           "\u003e"
+        //         ]
+        //      },
+        //      "text": ".\n\u003c/p\u003e",
+        //      "token_index": 0
+        //     }
+        //   ],
+        //   "created": 1643862189,
+        //   "id": "2dfd25bc-9a8e-440d-a808-29494b3b30f6",
+        //   "model": "gpt-neo-20B-fp16",
+        //   "object": "text_completion"
+        // }
+        // ```
+        let mut body = match body
+            .get("choices")
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+        {
+            Some(body) => body,
+            None => {
+                eprintln!("error parsing prompt: {:?}", body);
+                return Some(Cow::Borrowed("prompt request failed"));
+            }
+        };
+
+        // Cut the response down to the first newline since it currently
+        // doesn't respect stop characters.
+        if !raw {
+            // SAFETY: `split('\n')` will always return at least one elem.
+            body = body.split('\n').next().unwrap();
+        }
+
+        // Sanitize the response, because the user might've found a way
+        // to XSS @mentions or other fun stuff into the response.
+        let settings = if let Some(guild_id) = msg.guild_id {
+            // Be default, roles, users, channel, here, and everyone
+            // mentions are cleaned.
+            ContentSafeOptions::default()
+                // We do not want to clean channel mentions as they do
+                // not ping users.
+                .clean_channel(false)
+                // If it's a guild channel, we want mentioned users to be
+                // displayed as their display name.
+                .display_as_member_from(guild_id)
+        } else {
+            ContentSafeOptions::default()
+                .clean_channel(false)
+                .clean_role(false)
+        };
+        let response = content_safe(&ctx.cache, &body, &settings).await;
+
+        // Append a disclaimer to the response.
+        let response = format!("{}\n\n**DISCLAIMER**: This is an AI-generated response from the gpt-neo-20b model hosted on goose.ai", response);
+
+        return Some(Cow::Owned(response));
     }
 }
 

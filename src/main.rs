@@ -162,7 +162,7 @@ impl Handler {
                     return Some(Cow::Borrowed("prompt request failed"));
                 }
             };
-            println!("body: {:?}", body);
+            print!("response: {:?}", body);
             // Read the response into a `serde_json::Value`.
             let body: Value = match body.into_json() {
                 Ok(body) => body,
@@ -171,6 +171,7 @@ impl Handler {
                     return Some(Cow::Borrowed("prompt request failed"));
                 }
             };
+            println!(": {:?}", body);
             // Read the actual content of the response out of the JSON.
             //
             // ```json

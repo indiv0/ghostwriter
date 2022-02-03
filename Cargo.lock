@@ -274,7 +274,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghostwraiter"
+name = "ghostwriter"
 version = "0.1.0"
 dependencies = [
  "serenity",

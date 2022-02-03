@@ -350,7 +350,7 @@ impl RateLimit {
 
         // If we haven't reached the limit of 60 requests in this minute,
         // then the request is allowed.
-        if self.count <= 2 {
+        if self.count <= 60 {
             return None;
         }
 

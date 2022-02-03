@@ -233,6 +233,9 @@ impl Handler {
             };
             let response = content_safe(&ctx.cache, &body, &settings).await;
 
+            // Append a disclaimer to the response.
+            let response = format!("{}\n\n**DISCLAIMER**: This is an AI-generated response from the gpt-neo-20b model hosted on goose.ai", response);
+
             return Some(Cow::Owned(response));
         } else {
             // If the message wasn't a command, there's no reply to send.
